@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ecilost-wallet-postgres
+    environment:
+      POSTGRES_USER: wallet
+      POSTGRES_PASSWORD: wallet
+      POSTGRES_DB: ecilost_wallet
+    ports:
+      - "5434:5432"
+    volumes:
+      - wallet-postgres-data:/var/lib/postgresql/data
+
+volumes:
+  wallet-postgres-data:
