@@ -77,6 +77,44 @@ export class WalletService {
     }
   }
 
+  async getBalance(userId: string) {
+    const wallet = await this.prisma.wallet.findUnique({ where: { userId } });
+    if (!wallet) return this.emptyBalance();
+
+    return {
+      availableBalance: wallet.availableBalance.toFixed(2),
+      heldBalance: wallet.heldBalance.toFixed(2),
+      totalBalance: wallet.availableBalance.plus(wallet.heldBalance).toFixed(2),
+    };
+  }
+
+  async listTransactions(userId: string, page: number, pageSize: number) {
+    const wallet = await this.prisma.wallet.findUnique({ where: { userId } });
+    if (!wallet) return { items: [], page, pageSize, total: 0 };
+
+    const [transactions, total] = await Promise.all([
+      this.prisma.walletTransaction.findMany({
+        where: { walletId: wallet.id },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      this.prisma.walletTransaction.count({ where: { walletId: wallet.id } }),
+    ]);
+
+    return {
+      items: transactions.map((transaction) => ({
+        id: transaction.id,
+        type: transaction.type,
+        amount: transaction.amount.toFixed(2),
+        createdAt: transaction.createdAt,
+      })),
+      page,
+      pageSize,
+      total,
+    };
+  }
+
   private initialBalance(): Prisma.Decimal {
     const value = this.config.getOrThrow<string>('INITIAL_ECICOIN_BALANCE');
     const balance = new Prisma.Decimal(value);
@@ -84,5 +122,9 @@ export class WalletService {
       throw new InternalServerErrorException('INITIAL_ECICOIN_BALANCE must be a non-negative decimal');
     }
     return balance;
+  }
+
+  private emptyBalance() {
+    return { availableBalance: '0.00', heldBalance: '0.00', totalBalance: '0.00' };
   }
 }

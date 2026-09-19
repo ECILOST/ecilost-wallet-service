@@ -67,4 +67,60 @@ describe('WalletService', () => {
     );
     expect(result).toEqual({ wallet: updatedWallet, transaction: createdTransaction, replayed: false });
   });
+
+  it('devuelve saldos en cero para una wallet sin movimientos', async () => {
+    const prisma = {
+      wallet: { findUnique: vi.fn().mockResolvedValue(null) },
+    } as unknown as PrismaService;
+    const service = new WalletService(prisma, {} as ConfigService);
+
+    await expect(service.getBalance('student-without-wallet')).resolves.toEqual({
+      availableBalance: '0.00',
+      heldBalance: '0.00',
+      totalBalance: '0.00',
+    });
+    await expect(service.listTransactions('student-without-wallet', 1, 20)).resolves.toEqual({
+      items: [],
+      page: 1,
+      pageSize: 20,
+      total: 0,
+    });
+  });
+
+  it('calcula el total y pagina el historial del usuario autenticado', async () => {
+    const wallet = {
+      id: 'wallet-1',
+      userId: 'student-1',
+      availableBalance: new Prisma.Decimal(75),
+      heldBalance: new Prisma.Decimal(25),
+    };
+    const findMany = vi.fn().mockResolvedValue([
+      {
+        id: 'transaction-1',
+        type: WalletTransactionType.ADMIN_RECHARGE,
+        amount: new Prisma.Decimal(25),
+        createdAt: new Date('2026-09-19T12:00:00.000Z'),
+      },
+    ]);
+    const prisma = {
+      wallet: { findUnique: vi.fn().mockResolvedValue(wallet) },
+      walletTransaction: { findMany, count: vi.fn().mockResolvedValue(1) },
+    } as unknown as PrismaService;
+    const service = new WalletService(prisma, {} as ConfigService);
+
+    await expect(service.getBalance('student-1')).resolves.toEqual({
+      availableBalance: '75.00',
+      heldBalance: '25.00',
+      totalBalance: '100.00',
+    });
+    await expect(service.listTransactions('student-1', 2, 10)).resolves.toMatchObject({
+      page: 2,
+      pageSize: 10,
+      total: 1,
+      items: [{ id: 'transaction-1', type: WalletTransactionType.ADMIN_RECHARGE, amount: '25.00' }],
+    });
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ skip: 10, take: 10, orderBy: { createdAt: 'desc' } }),
+    );
+  });
 });

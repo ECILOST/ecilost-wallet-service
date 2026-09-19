@@ -44,3 +44,14 @@ Todas las rutas requieren `Authorization: Bearer <access-token>` emitido por
 Cada recarga actualiza el saldo disponible y crea el movimiento contable en la
 misma transacción de PostgreSQL. Si se repite una `reference`, se devuelve el
 resultado original sin duplicar el crédito.
+
+## HU-10: consulta de saldo e histórico
+
+- `GET /wallet/me`: devuelve `availableBalance`, `heldBalance` y
+  `totalBalance`. Los importes se serializan como texto decimal de dos cifras
+  para no perder precisión.
+- `GET /wallet/me/transactions?page=1&pageSize=20`: lista movimientos del
+  usuario autenticado, del más reciente al más antiguo. Cada elemento incluye
+  tipo, monto y fecha.
+
+Una wallet aún inexistente responde con saldos `0.00` e historial vacío.
