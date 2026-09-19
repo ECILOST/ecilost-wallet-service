@@ -7,5 +7,43 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Las entidades se definirán al implementar HU-09. El servicio mantiene un
-// esquema propio (wallet) y nunca comparte la base de datos de auth-service.
+// El servicio mantiene este esquema de forma independiente: userId corresponde
+// al `sub` del JWT emitido por auth-service y no existe una FK entre servicios.
+model Wallet {
+  id               String              @id @default(uuid()) @db.Uuid
+  userId           String              @unique @map("user_id")
+  availableBalance Decimal             @default(0) @map("available_balance") @db.Decimal(18, 2)
+  heldBalance      Decimal             @default(0) @map("held_balance") @db.Decimal(18, 2)
+  transactions     WalletTransaction[]
+  createdAt        DateTime            @default(now()) @map("created_at")
+  updatedAt        DateTime            @updatedAt @map("updated_at")
+
+  @@map("wallets")
+}
+
+// Los importes son siempre positivos. Los deltas expresan qué saldo cambia:
+// emisión/recarga (+available), reserva (-available, +held), liberación
+// (+available, -held) y débito (-held). Así el historial queda auditable.
+model WalletTransaction {
+  id             String                @id @default(uuid()) @db.Uuid
+  walletId       String                @map("wallet_id") @db.Uuid
+  type           WalletTransactionType
+  amount         Decimal               @db.Decimal(18, 2)
+  availableDelta Decimal               @map("available_delta") @db.Decimal(18, 2)
+  heldDelta      Decimal               @map("held_delta") @db.Decimal(18, 2)
+  reference      String?               @unique
+  metadata       Json?
+  createdAt      DateTime              @default(now()) @map("created_at")
+  wallet         Wallet                @relation(fields: [walletId], references: [id], onDelete: Restrict)
+
+  @@index([walletId, createdAt(sort: Desc)])
+  @@map("wallet_transactions")
+}
+
+enum WalletTransactionType {
+  INITIAL_ISSUANCE
+  ADMIN_RECHARGE
+  HOLD
+  RELEASE
+  DEBIT
+}
