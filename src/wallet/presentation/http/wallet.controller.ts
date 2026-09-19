@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, NotFoundException, Param, Post, Query, UseGuards } from '@nestjs/common';
 
 import { AuthenticatedUser } from '../../../auth/authenticated-user.interface';
 import { CurrentUser } from '../../../auth/current-user.decorator';
@@ -13,6 +13,20 @@ import { ListTransactionsQueryDto } from './dto/list-transactions-query.dto';
 @UseGuards(JwtAuthGuard)
 export class WalletController {
   constructor(private readonly walletService: WalletService) {}
+
+  /**
+   * Consulta el saldo propio.
+   *
+   * Responde 404 si la billetera todavia no existe, en vez de crearla: un `GET` que escribe
+   * convierte cada refresco de pantalla en una escritura. El cliente que reciba ese 404
+   * llama una sola vez a `POST me/bootstrap` y no vuelve a verlo nunca.
+   */
+  @Get('me')
+  async mine(@CurrentUser() user: AuthenticatedUser) {
+    const wallet = await this.walletService.findByUser(user.id);
+    if (!wallet) throw new NotFoundException('Wallet does not exist for this user');
+    return wallet;
+  }
 
   @Post('me/bootstrap')
   bootstrap(@CurrentUser() user: AuthenticatedUser) {
