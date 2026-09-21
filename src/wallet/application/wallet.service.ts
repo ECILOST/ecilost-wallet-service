@@ -11,6 +11,17 @@ export class WalletService {
     private readonly config: ConfigService,
   ) {}
 
+  /**
+   * La billetera de alguien, o `null` si todavia no la tiene.
+   *
+   * Es una lectura y por eso no crea nada: quien la consulta puede no ser quien deberia
+   * provisionarla, y un `GET` que escribe convierte cualquier refresco de pantalla en una
+   * escritura. Provisionar es `bootstrap`, que ademas registra la emision inicial.
+   */
+  async findByUser(userId: string) {
+    return this.prisma.wallet.findUnique({ where: { userId } });
+  }
+
   async bootstrap(userId: string) {
     const initialBalance = this.initialBalance();
     return this.prisma.wallet.upsert({
