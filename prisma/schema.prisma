@@ -15,10 +15,26 @@ model Wallet {
   availableBalance Decimal             @default(0) @map("available_balance") @db.Decimal(18, 2)
   heldBalance      Decimal             @default(0) @map("held_balance") @db.Decimal(18, 2)
   transactions     WalletTransaction[]
+  holds            WalletHold[]
   createdAt        DateTime            @default(now()) @map("created_at")
   updatedAt        DateTime            @updatedAt @map("updated_at")
 
   @@map("wallets")
+}
+
+/// Reserva vigente por estudiante y ronda. La referencia es idempotente y permite que
+/// una mejora sustituya el importe comprometido sin acumular reservas antiguas.
+model WalletHold {
+  id        String   @id @default(uuid()) @db.Uuid
+  walletId  String   @map("wallet_id") @db.Uuid
+  reference String   @unique
+  amount    Decimal  @db.Decimal(18, 2)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  wallet    Wallet   @relation(fields: [walletId], references: [id], onDelete: Restrict)
+
+  @@index([walletId])
+  @@map("wallet_holds")
 }
 
 // Los importes son siempre positivos. Los deltas expresan qué saldo cambia:

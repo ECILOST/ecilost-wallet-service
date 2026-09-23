@@ -1,4 +1,4 @@
-import { Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma, WalletTransactionType } from '@prisma/client';
 
@@ -86,6 +86,32 @@ export class WalletService {
       }
       throw error;
     }
+  }
+
+  /** Reserva exactamente `amount`; llamadas repetidas con la misma referencia son idempotentes. */
+  async hold(userId: string, reference: string, amountInput: number) {
+    const amount = new Prisma.Decimal(amountInput);
+    if (!amount.isFinite() || amount.lte(0)) throw new InternalServerErrorException('Hold amount must be positive');
+    return this.prisma.$transaction(async (tx) => {
+      const wallet = await tx.wallet.findUnique({ where: { userId } });
+      if (!wallet) throw new NotFoundException('Wallet does not exist for this user');
+      const existing = await tx.walletHold.findUnique({ where: { reference } });
+      if (existing && existing.walletId !== wallet.id) throw new InternalServerErrorException('Hold reference belongs to another wallet');
+      const current = existing?.amount ?? new Prisma.Decimal(0);
+      const delta = amount.minus(current);
+      if (delta.eq(0)) return { accepted: true, replayed: true };
+      if (delta.gt(0)) {
+        const changed = await tx.wallet.updateMany({ where: { id: wallet.id, availableBalance: { gte: delta } }, data: { availableBalance: { decrement: delta }, heldBalance: { increment: delta } } });
+        if (!changed.count) throw new ConflictException('Insufficient available ECICoin');
+        await tx.walletTransaction.create({ data: { walletId: wallet.id, type: WalletTransactionType.HOLD, amount: delta, availableDelta: delta.negated(), heldDelta: delta, metadata: { reference } } });
+      } else {
+        const released = delta.negated();
+        await tx.wallet.update({ where: { id: wallet.id }, data: { availableBalance: { increment: released }, heldBalance: { decrement: released } } });
+        await tx.walletTransaction.create({ data: { walletId: wallet.id, type: WalletTransactionType.RELEASE, amount: released, availableDelta: released, heldDelta: released.negated(), metadata: { reference } } });
+      }
+      await tx.walletHold.upsert({ where: { reference }, create: { walletId: wallet.id, reference, amount }, update: { amount } });
+      return { accepted: true, replayed: false };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
 
   async getBalance(userId: string) {
