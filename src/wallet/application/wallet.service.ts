@@ -114,6 +114,39 @@ export class WalletService {
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
 
+  /**
+   * Libera una reserva vigente cuando la puja que la originó fue superada.
+   * `amount` identifica la versión de la puja: un mensaje tardío de una puja
+   * anterior no puede liberar una reserva nueva del mismo estudiante y ronda.
+   */
+  async release(userId: string, reference: string, amountInput: number) {
+    const amount = new Prisma.Decimal(amountInput);
+    if (!amount.isFinite() || amount.lte(0)) throw new InternalServerErrorException('Release amount must be positive');
+    return this.prisma.$transaction(async (tx) => {
+      const wallet = await tx.wallet.findUnique({ where: { userId } });
+      if (!wallet) throw new NotFoundException('Wallet does not exist for this user');
+      const hold = await tx.walletHold.findUnique({ where: { reference } });
+      if (!hold || !hold.amount.eq(amount)) return { accepted: true, replayed: true };
+      if (hold.walletId !== wallet.id) throw new InternalServerErrorException('Hold reference belongs to another wallet');
+      await tx.wallet.update({
+        where: { id: wallet.id },
+        data: { availableBalance: { increment: hold.amount }, heldBalance: { decrement: hold.amount } },
+      });
+      await tx.walletTransaction.create({
+        data: {
+          walletId: wallet.id,
+          type: WalletTransactionType.RELEASE,
+          amount: hold.amount,
+          availableDelta: hold.amount,
+          heldDelta: hold.amount.negated(),
+          metadata: { reference, reason: 'outbid' },
+        },
+      });
+      await tx.walletHold.delete({ where: { reference } });
+      return { accepted: true, replayed: false };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }
+
   async getBalance(userId: string) {
     const wallet = await this.prisma.wallet.findUnique({ where: { userId } });
     if (!wallet) return this.emptyBalance();
