@@ -152,6 +152,65 @@ export class WalletService {
     });
   }
 
+  /**
+   * Liquida una ronda cerrada (HU-14, HU-29): la reserva del ganador se convierte en debito
+   * y cualquier otra reserva de la ronda vuelve al disponible. Una ronda desierta
+   * (`winnerId` nulo) solo libera.
+   *
+   * Es idempotente sin tabla aparte: cada reserva se borra al liquidarla, asi que una
+   * reentrega del mismo evento ya no encuentra nada que mover.
+   */
+  async settleRound(roundId: string, winnerId: string | null) {
+    const prefix = `bid:${roundId}:`;
+    const winnerReference = winnerId ? `${prefix}${winnerId}` : null;
+
+    return this.inSerializableTransaction(async (tx) => {
+      const holds = await tx.walletHold.findMany({ where: { reference: { startsWith: prefix } } });
+      let debited: string | null = null;
+      let released = 0;
+
+      for (const hold of holds) {
+        const won = hold.reference === winnerReference;
+        // Lo comprometido sale siempre de `held`; solo lo que se libera vuelve a `available`.
+        const changed = await tx.wallet.updateMany({
+          where: { id: hold.walletId, heldBalance: { gte: hold.amount } },
+          data: won
+            ? { heldBalance: { decrement: hold.amount } }
+            : { heldBalance: { decrement: hold.amount }, availableBalance: { increment: hold.amount } },
+        });
+        if (!changed.count) throw new InternalServerErrorException('Wallet hold invariant was violated');
+
+        await tx.walletTransaction.create({
+          data: won
+            ? {
+                walletId: hold.walletId,
+                type: WalletTransactionType.DEBIT,
+                amount: hold.amount,
+                availableDelta: new Prisma.Decimal(0),
+                heldDelta: hold.amount.negated(),
+                // Unica por ronda: aunque la reserva se recreara, no se cobra dos veces.
+                reference: `settle:${roundId}`,
+                metadata: { reference: hold.reference, reason: 'round-awarded' },
+              }
+            : {
+                walletId: hold.walletId,
+                type: WalletTransactionType.RELEASE,
+                amount: hold.amount,
+                availableDelta: hold.amount,
+                heldDelta: hold.amount.negated(),
+                metadata: { reference: hold.reference, reason: 'round-closed' },
+              },
+        });
+        await tx.walletHold.delete({ where: { reference: hold.reference } });
+
+        if (won) debited = hold.amount.toFixed(2);
+        else released += 1;
+      }
+
+      return { roundId, debited, released };
+    });
+  }
+
   async getBalance(userId: string) {
     const wallet = await this.prisma.wallet.findUnique({ where: { userId } });
     if (!wallet) return this.emptyBalance();
