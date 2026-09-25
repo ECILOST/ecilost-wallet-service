@@ -37,9 +37,9 @@ Todas las rutas requieren `Authorization: Bearer <access-token>` emitido por
   única emisión inicial. Es idempotente: llamadas posteriores no acreditan de
   nuevo el saldo inicial.
 - `POST /wallet/:userId/recharges`: acredita una recarga administrada. Solo el
-  rol `STAFF` puede usarla. El cuerpo es `{ "amount": 25, "reference":
-  "opcional-idempotente" }`; los montos deben ser positivos y tener hasta dos
-  decimales.
+  rol `STAFF` puede usarla. El cuerpo es `{ "amount": 50000, "reference":
+  "opcional-idempotente" }`; los montos deben ser enteros positivos: un ECICoin
+  vale lo mismo que un peso colombiano, sin centavos.
 
 Cada recarga actualiza el saldo disponible y crea el movimiento contable en la
 misma transacción de PostgreSQL. Si se repite una `reference`, se devuelve el
