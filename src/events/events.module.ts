@@ -4,6 +4,7 @@ import { UserCreatedConsumer } from "./user-created.consumer";
 import { BidHoldConsumer } from './bid-hold.consumer';
 import { BidReleaseConsumer } from './bid-release.consumer';
 import { RoundSettlementConsumer } from './round-settlement.consumer';
+import { BalanceQueryConsumer } from './balance-query.consumer';
 
-@Module({ imports: [WalletModule], providers: [UserCreatedConsumer, BidHoldConsumer, BidReleaseConsumer, RoundSettlementConsumer] })
+@Module({ imports: [WalletModule], providers: [UserCreatedConsumer, BidHoldConsumer, BidReleaseConsumer, RoundSettlementConsumer, BalanceQueryConsumer] })
 export class EventsModule {}
