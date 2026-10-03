@@ -1,9 +1,9 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as amqp from 'amqplib';
 import { WalletService } from '../wallet/application/wallet.service';
+import { ResilientConsumer } from './resilient-consumer';
 
-const EXCHANGE = 'ecilost.events';
 const KEY = 'auction.round.closed.v1';
 const QUEUE = 'ecilost.wallet.round-settlements';
 
@@ -23,39 +23,24 @@ interface RoundClosed {
  * cola. La liquidacion es idempotente, asi que reintentar no cobra dos veces.
  */
 @Injectable()
-export class RoundSettlementConsumer implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(RoundSettlementConsumer.name);
-  private connection?: amqp.ChannelModel;
-  private channel?: amqp.Channel;
+export class RoundSettlementConsumer extends ResilientConsumer {
+  protected readonly logger = new Logger(RoundSettlementConsumer.name);
 
-  constructor(private readonly config: ConfigService, private readonly wallets: WalletService) {}
-
-  async onModuleInit() {
-    this.connection = await amqp.connect(this.config.getOrThrow<string>('RABBITMQ_URL'));
-    this.channel = await this.connection.createChannel();
-    await this.channel.assertExchange(EXCHANGE, 'topic', { durable: true });
-    await this.channel.assertQueue(QUEUE, { durable: true });
-    await this.channel.bindQueue(QUEUE, EXCHANGE, KEY);
-    await this.channel.consume(QUEUE, (message) => void this.handle(message));
+  constructor(config: ConfigService, private readonly wallets: WalletService) {
+    super(config, QUEUE, KEY);
   }
 
-  async onModuleDestroy() {
-    await this.channel?.close();
-    await this.connection?.close();
-  }
-
-  private async handle(message: amqp.ConsumeMessage | null) {
-    if (!message || !this.channel) return;
+  protected async handle(message: amqp.ConsumeMessage, channel: amqp.Channel) {
     try {
       const event = JSON.parse(message.content.toString()) as RoundClosed;
       const winnerId = event.winnerId !== undefined ? event.winnerId : (event.currentBidderId ?? null);
       const result = await this.wallets.settleRound(event.roundId, winnerId);
       this.logger.log(`Ronda ${result.roundId} liquidada: debito ${result.debited ?? 'ninguno'}, ${result.released} reservas liberadas.`);
-      this.channel.ack(message);
+      channel.ack(message);
     } catch (error) {
       const retry = !message.fields.redelivered;
       this.logger.error(`No se pudo liquidar la ronda (${retry ? 'se reintenta' : 'se descarta'}): ${String(error)}`);
-      this.channel.nack(message, false, retry);
+      channel.nack(message, false, retry);
     }
   }
 }

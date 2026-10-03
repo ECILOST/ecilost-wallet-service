@@ -33,11 +33,6 @@ export class WalletController {
     return this.walletService.bootstrap(user.id);
   }
 
-  @Get('me')
-  getBalance(@CurrentUser() user: AuthenticatedUser) {
-    return this.walletService.getBalance(user.id);
-  }
-
   @Get('me/transactions')
   listTransactions(
     @CurrentUser() user: AuthenticatedUser,
