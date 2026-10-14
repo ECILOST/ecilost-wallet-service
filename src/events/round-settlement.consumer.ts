@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Prisma } from '@prisma/client';
 import * as amqp from 'amqplib';
 import { WalletService } from '../wallet/application/wallet.service';
 import { ResilientConsumer } from './resilient-consumer';
@@ -13,6 +14,17 @@ interface RoundClosed {
   winnerId?: string | null;
   /** Eventos anteriores a HU-28 no traen `winnerId`: el lider al cerrar es el ganador. */
   currentBidderId?: string | null;
+  /** Precio con que se adjudico la ronda (HU-24). Eventos anteriores no lo traen. */
+  winningAmount?: string | null;
+}
+
+/**
+ * `winningAmount` viaja como texto decimal. Ausente, nulo o invalido: `null`, y se cobra la
+ * reserva completa como antes. Descartar el mensaje seria peor: las reservas quedarian
+ * retenidas y el objeto vendido sin cobro.
+ */
+export function parseWinningAmount(value: unknown): Prisma.Decimal | null {
+  return typeof value === 'string' && /^\d+(\.\d+)?$/.test(value) ? new Prisma.Decimal(value) : null;
 }
 
 /**
@@ -34,8 +46,18 @@ export class RoundSettlementConsumer extends ResilientConsumer {
     try {
       const event = JSON.parse(message.content.toString()) as RoundClosed;
       const winnerId = event.winnerId !== undefined ? event.winnerId : (event.currentBidderId ?? null);
-      const result = await this.wallets.settleRound(event.roundId, winnerId);
-      this.logger.log(`Ronda ${result.roundId} liquidada: debito ${result.debited ?? 'ninguno'}, ${result.released} reservas liberadas.`);
+      const winningAmount = parseWinningAmount(event.winningAmount);
+      if (winningAmount === null && event.winningAmount != null) {
+        this.logger.warn(`Ronda ${event.roundId}: winningAmount invalido (${String(event.winningAmount)}); se cobra la reserva completa.`);
+      }
+      const result = await this.wallets.settleRound(event.roundId, winnerId, winningAmount);
+      this.logger.log(
+        `Ronda ${result.roundId} liquidada: debito ${result.debited ?? 'ninguno'}, excedente devuelto ${result.refunded ?? 'ninguno'}, ` +
+          `${result.released} reservas liberadas.`,
+      );
+      if (result.shortfall) {
+        this.logger.warn(`Ronda ${result.roundId}: la reserva del ganador no alcanzaba el precio adjudicado; faltaron ${result.shortfall}.`);
+      }
       channel.ack(message);
     } catch (error) {
       const retry = !message.fields.redelivered;
