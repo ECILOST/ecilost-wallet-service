@@ -157,57 +157,81 @@ export class WalletService {
    * y cualquier otra reserva de la ronda vuelve al disponible. Una ronda desierta
    * (`winnerId` nulo) solo libera.
    *
+   * Al ganador se le cobra `winningAmount`, el precio con que auction cerro la ronda, y no
+   * lo que tenga reservado: si la reserva quedo por encima (una compra inmediata que perdio
+   * contra el vencimiento antes de que auction la deshiciera, HU-24), el excedente vuelve al
+   * disponible. Nunca se cobra mas de lo reservado: si la reserva no alcanza, se cobra la
+   * reserva y el faltante se informa. Sin `winningAmount` (eventos anteriores) se cobra la
+   * reserva completa, como antes.
+   *
    * Es idempotente sin tabla aparte: cada reserva se borra al liquidarla, asi que una
    * reentrega del mismo evento ya no encuentra nada que mover.
    */
-  async settleRound(roundId: string, winnerId: string | null) {
+  async settleRound(roundId: string, winnerId: string | null, winningAmount?: Prisma.Decimal | null) {
     const prefix = `bid:${roundId}:`;
     const winnerReference = winnerId ? `${prefix}${winnerId}` : null;
 
     return this.inSerializableTransaction(async (tx) => {
       const holds = await tx.walletHold.findMany({ where: { reference: { startsWith: prefix } } });
       let debited: string | null = null;
+      let refunded: string | null = null;
+      let shortfall: string | null = null;
       let released = 0;
 
       for (const hold of holds) {
         const won = hold.reference === winnerReference;
+        const charge = won && winningAmount ? Prisma.Decimal.min(hold.amount, winningAmount) : hold.amount;
+        // Lo que vuelve al disponible: toda la reserva de quien no gano, el excedente del ganador.
+        const returned = won ? hold.amount.minus(charge) : hold.amount;
         // Lo comprometido sale siempre de `held`; solo lo que se libera vuelve a `available`.
         const changed = await tx.wallet.updateMany({
           where: { id: hold.walletId, heldBalance: { gte: hold.amount } },
-          data: won
+          data: won && returned.isZero()
             ? { heldBalance: { decrement: hold.amount } }
-            : { heldBalance: { decrement: hold.amount }, availableBalance: { increment: hold.amount } },
+            : { heldBalance: { decrement: hold.amount }, availableBalance: { increment: returned } },
         });
         if (!changed.count) throw new InternalServerErrorException('Wallet hold invariant was violated');
 
-        await tx.walletTransaction.create({
-          data: won
-            ? {
-                walletId: hold.walletId,
-                type: WalletTransactionType.DEBIT,
-                amount: hold.amount,
-                availableDelta: new Prisma.Decimal(0),
-                heldDelta: hold.amount.negated(),
-                // Unica por ronda: aunque la reserva se recreara, no se cobra dos veces.
-                reference: `settle:${roundId}`,
-                metadata: { reference: hold.reference, reason: 'round-awarded' },
-              }
-            : {
-                walletId: hold.walletId,
-                type: WalletTransactionType.RELEASE,
-                amount: hold.amount,
-                availableDelta: hold.amount,
-                heldDelta: hold.amount.negated(),
-                metadata: { reference: hold.reference, reason: 'round-closed' },
+        if (won) {
+          const missing = winningAmount && winningAmount.gt(hold.amount) ? winningAmount.minus(hold.amount) : null;
+          await tx.walletTransaction.create({
+            data: {
+              walletId: hold.walletId,
+              type: WalletTransactionType.DEBIT,
+              amount: charge,
+              availableDelta: new Prisma.Decimal(0),
+              heldDelta: charge.negated(),
+              // Unica por ronda: aunque la reserva se recreara, no se cobra dos veces.
+              reference: `settle:${roundId}`,
+              metadata: {
+                reference: hold.reference,
+                reason: 'round-awarded',
+                ...(missing ? { winningAmount: winningAmount!.toFixed(2), shortfall: missing.toFixed(2) } : {}),
               },
-        });
+            },
+          });
+          debited = charge.toFixed(2);
+          if (missing) shortfall = missing.toFixed(2);
+        }
+        if (!won || !returned.isZero()) {
+          await tx.walletTransaction.create({
+            data: {
+              walletId: hold.walletId,
+              type: WalletTransactionType.RELEASE,
+              amount: returned,
+              availableDelta: returned,
+              heldDelta: returned.negated(),
+              metadata: { reference: hold.reference, reason: won ? 'round-awarded-excess' : 'round-closed' },
+            },
+          });
+          if (won) refunded = returned.toFixed(2);
+        }
         await tx.walletHold.delete({ where: { reference: hold.reference } });
 
-        if (won) debited = hold.amount.toFixed(2);
-        else released += 1;
+        if (!won) released += 1;
       }
 
-      return { roundId, debited, released };
+      return { roundId, debited, refunded, shortfall, released };
     });
   }
 
