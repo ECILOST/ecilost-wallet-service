@@ -10,7 +10,8 @@ COPY nest-cli.json tsconfig*.json ./
 COPY src ./src
 
 ENV DATABASE_URL=postgresql://build:build@127.0.0.1:5432/build
-RUN npm ci --no-audit --no-fund && npm run prisma:generate && npm run build
+# `npm ci` genera el cliente de Prisma (postinstall) y `build` lo vuelve a generar antes de compilar.
+RUN npm ci --no-audit --no-fund && npm run build
 
 FROM node:22-bookworm-slim AS runtime
 RUN apt-get update -y && apt-get install -y --no-install-recommends openssl && rm -rf /var/lib/apt/lists/*
