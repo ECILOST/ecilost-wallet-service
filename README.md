@@ -12,7 +12,7 @@ src/wallet/
   infrastructure/       # Persistencia e integraciones
   presentation/http/    # Controllers y DTOs
 prisma/                 # Esquema y migraciones
-test/                   # Unitarias y e2e
+test/                   # Integracion contra PostgreSQL (npm run test:integration)
 docs/                   # Contratos y decisiones
 ```
 

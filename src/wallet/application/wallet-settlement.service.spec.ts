@@ -9,8 +9,13 @@ const hold = (userId: string, amount: number, walletId = `w-${userId}`) => ({
 
 function setup(holds: ReturnType<typeof hold>[]) {
   const tx = {
-    walletHold: { findMany: vi.fn().mockResolvedValue(holds), delete: vi.fn() },
-    wallet: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+    walletHold: {
+      findMany: vi.fn().mockResolvedValue(holds),
+      // Releida tras bloquear la billetera: sigue vigente.
+      findUnique: vi.fn(({ where }) => Promise.resolve(holds.find((h) => h.reference === where.reference) ?? null)),
+      delete: vi.fn(),
+    },
+    wallet: { update: vi.fn().mockResolvedValue({}), updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
     walletTransaction: { create: vi.fn() },
   };
   const service = new WalletService({ $transaction: vi.fn((fn) => fn(tx)) } as never, { getOrThrow: vi.fn() } as never);
@@ -23,7 +28,7 @@ describe('Round settlement', () => {
 
     await expect(service.settleRound('round', 'alice')).resolves.toEqual({ roundId: 'round', debited: '200.00', refunded: null, shortfall: null, released: 1 });
 
-    expect(tx.walletHold.findMany).toHaveBeenCalledWith({ where: { reference: { startsWith: 'bid:round:' } } });
+    expect(tx.walletHold.findMany).toHaveBeenCalledWith({ where: { reference: { startsWith: 'bid:round:' } }, orderBy: { walletId: 'asc' } });
     // Ganador: sale de lo comprometido y no vuelve al disponible.
     expect(tx.wallet.updateMany).toHaveBeenCalledWith({
       where: { id: 'w-alice', heldBalance: { gte: new Prisma.Decimal(200) } },

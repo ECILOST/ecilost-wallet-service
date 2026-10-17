@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as amqp from 'amqplib';
 import { WalletService } from '../wallet/application/wallet.service';
+import { rejectionReason } from './rejection-reason';
 import { ResilientConsumer } from './resilient-consumer';
 
 const KEY = 'wallet.bid-release.requested.v1';
@@ -18,8 +19,9 @@ export class BidReleaseConsumer extends ResilientConsumer {
       const result = await this.wallets.release(body.userId, body.reference, body.amount);
       if (replyTo) channel.sendToQueue(replyTo, Buffer.from(JSON.stringify(result)), { correlationId });
     } catch (error) {
-      this.logger.warn(`Bid release rejected: ${String(error)}`);
-      if (replyTo) channel.sendToQueue(replyTo, Buffer.from(JSON.stringify({ accepted: false })), { correlationId });
+      const reason = rejectionReason(error);
+      this.logger.warn(`Bid release rejected (${reason}): ${String(error)}`);
+      if (replyTo) channel.sendToQueue(replyTo, Buffer.from(JSON.stringify({ accepted: false, reason })), { correlationId });
     } finally { channel.ack(message); }
   }
 }

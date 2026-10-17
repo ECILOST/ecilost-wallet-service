@@ -19,6 +19,17 @@ class TestConsumer extends ResilientConsumer {
   }
 }
 
+class ConfirmingConsumer extends TestConsumer {
+  readonly calls: string[] = [];
+  constructor() {
+    super();
+    (this as unknown as { options: { confirm: boolean } }).options = { confirm: true };
+  }
+  protected async setup() {
+    this.calls.push('setup');
+  }
+}
+
 function fakeConnection() {
   const connection = Object.assign(new EventEmitter(), {
     channel: {
@@ -29,9 +40,11 @@ function fakeConnection() {
       close: vi.fn().mockResolvedValue(undefined),
     },
     createChannel: vi.fn(),
+    createConfirmChannel: vi.fn(),
     close: vi.fn().mockResolvedValue(undefined),
   });
   connection.createChannel.mockResolvedValue(connection.channel);
+  connection.createConfirmChannel.mockResolvedValue(connection.channel);
   return connection;
 }
 
@@ -89,5 +102,20 @@ describe('ResilientConsumer', () => {
     await vi.advanceTimersByTimeAsync(30_000);
 
     expect(connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('con confirm usa un canal con confirmaciones y declara sus colas antes de consumir', async () => {
+    const connection = fakeConnection();
+    connect.mockResolvedValueOnce(connection);
+    const consumer = new ConfirmingConsumer();
+    connection.channel.consume.mockImplementation(async () => { consumer.calls.push('consume'); });
+
+    consumer.onModuleInit();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(connection.createConfirmChannel).toHaveBeenCalledOnce();
+    expect(connection.createChannel).not.toHaveBeenCalled();
+    expect(consumer.calls).toEqual(['setup', 'consume']);
+    await consumer.onModuleDestroy();
   });
 });

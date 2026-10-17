@@ -4,6 +4,17 @@ import { Prisma, WalletTransactionType } from '@prisma/client';
 
 import { PrismaService } from '../../prisma/prisma.service';
 
+/** Intentos ante un deadlock (el primero y sus reintentos). Con bloqueo de fila son raros. */
+export const WALLET_TX_ATTEMPTS = 3;
+const BACKOFF_BASE_MS = 20;
+
+/** Espera antes del reintento `attempt` (0 = el primero): al azar entre 0 y 20, 40... ms. */
+export function retryBackoffMs(attempt: number): number {
+  return Math.floor(Math.random() * BACKOFF_BASE_MS * 2 ** attempt);
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 @Injectable()
 export class WalletService {
   constructor(
@@ -48,7 +59,7 @@ export class WalletService {
     const amount = new Prisma.Decimal(amountInput);
     if (!amount.isFinite() || amount.lte(0)) throw new InternalServerErrorException('Recharge amount must be positive');
     try {
-      return await this.inSerializableTransaction(async (tx) => {
+      return await this.inWalletTransaction(async (tx) => {
         if (reference) {
           const existing = await tx.walletTransaction.findUnique({
             where: { reference },
@@ -93,17 +104,17 @@ export class WalletService {
   async hold(userId: string, reference: string, amountInput: number) {
     const amount = new Prisma.Decimal(amountInput);
     if (!amount.isFinite() || amount.lte(0)) throw new InternalServerErrorException('Hold amount must be positive');
-    return this.inSerializableTransaction(async (tx) => {
-      const wallet = await tx.wallet.findUnique({ where: { userId } });
-      if (!wallet) throw new NotFoundException('Wallet does not exist for this user');
+    return this.inWalletTransaction(async (tx) => {
+      // Con la billetera bloqueada nadie mas cambia sus reservas: la que se lee es la vigente.
+      const wallet = await this.lockWallet(tx, { userId });
       const existing = await tx.walletHold.findUnique({ where: { reference } });
       if (existing && existing.walletId !== wallet.id) throw new InternalServerErrorException('Hold reference belongs to another wallet');
       const current = existing?.amount ?? new Prisma.Decimal(0);
       const delta = amount.minus(current);
       if (delta.eq(0)) return { accepted: true, replayed: true };
       if (delta.gt(0)) {
-        // Esta única sentencia es el árbitro de dos reservas simultáneas: PostgreSQL
-        // bloquea la fila y reevalúa el saldo disponible antes de modificarla.
+        // La condición sobre el saldo es la última defensa: aun sin el bloqueo previo,
+        // PostgreSQL reevalúa el disponible sobre la fila vigente antes de modificarla.
         const changed = await tx.wallet.updateMany({ where: { id: wallet.id, availableBalance: { gte: delta } }, data: { availableBalance: { decrement: delta }, heldBalance: { increment: delta } } });
         if (!changed.count) throw new ConflictException('Insufficient available ECICoin');
         await tx.walletTransaction.create({ data: { walletId: wallet.id, type: WalletTransactionType.HOLD, amount: delta, availableDelta: delta.negated(), heldDelta: delta, metadata: { reference } } });
@@ -126,9 +137,8 @@ export class WalletService {
   async release(userId: string, reference: string, amountInput: number) {
     const amount = new Prisma.Decimal(amountInput);
     if (!amount.isFinite() || amount.lte(0)) throw new InternalServerErrorException('Release amount must be positive');
-    return this.inSerializableTransaction(async (tx) => {
-      const wallet = await tx.wallet.findUnique({ where: { userId } });
-      if (!wallet) throw new NotFoundException('Wallet does not exist for this user');
+    return this.inWalletTransaction(async (tx) => {
+      const wallet = await this.lockWallet(tx, { userId });
       const hold = await tx.walletHold.findUnique({ where: { reference } });
       if (!hold || !hold.amount.eq(amount)) return { accepted: true, replayed: true };
       if (hold.walletId !== wallet.id) throw new InternalServerErrorException('Hold reference belongs to another wallet');
@@ -166,19 +176,26 @@ export class WalletService {
    *
    * Es idempotente sin tabla aparte: cada reserva se borra al liquidarla, asi que una
    * reentrega del mismo evento ya no encuentra nada que mover.
+   *
+   * Cada reserva se relee despues de bloquear su billetera: si otra liquidacion de la misma
+   * ronda se adelanto, ya no esta y se salta. Las billeteras se bloquean en orden de `walletId`
+   * para que dos liquidaciones simultaneas no se esperen en cruz (deadlock).
    */
   async settleRound(roundId: string, winnerId: string | null, winningAmount?: Prisma.Decimal | null) {
     const prefix = `bid:${roundId}:`;
     const winnerReference = winnerId ? `${prefix}${winnerId}` : null;
 
-    return this.inSerializableTransaction(async (tx) => {
-      const holds = await tx.walletHold.findMany({ where: { reference: { startsWith: prefix } } });
+    return this.inWalletTransaction(async (tx) => {
+      const pending = await tx.walletHold.findMany({ where: { reference: { startsWith: prefix } }, orderBy: { walletId: 'asc' } });
       let debited: string | null = null;
       let refunded: string | null = null;
       let shortfall: string | null = null;
       let released = 0;
 
-      for (const hold of holds) {
+      for (const { walletId, reference } of pending) {
+        await this.lockWallet(tx, { id: walletId });
+        const hold = await tx.walletHold.findUnique({ where: { reference } });
+        if (!hold) continue;
         const won = hold.reference === winnerReference;
         const charge = won && winningAmount ? Prisma.Decimal.min(hold.amount, winningAmount) : hold.amount;
         // Lo que vuelve al disponible: toda la reserva de quien no gano, el excedente del ganador.
@@ -286,17 +303,43 @@ export class WalletService {
     return { availableBalance: '0.00', heldBalance: '0.00', totalBalance: '0.00' };
   }
 
-  /** Reintenta conflictos 40001/P2034 sin repetir efectos fuera de la transacción. */
-  private async inSerializableTransaction<T>(operation: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
-    const retries = 3;
-    for (let attempt = 0; attempt < retries; attempt += 1) {
+  /**
+   * Bloquea la fila de la billetera hasta el fin de la transaccion y la devuelve vigente.
+   *
+   * Es el unico punto de serializacion: todo lo que cambia los saldos o las reservas de una
+   * billetera pasa primero por aqui, asi que dos operaciones sobre la misma billetera se
+   * turnan y las de billeteras distintas no se tocan.
+   */
+  private async lockWallet(tx: Prisma.TransactionClient, where: Prisma.WalletWhereUniqueInput) {
+    try {
+      return await tx.wallet.update({ where, data: { updatedAt: new Date() } });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
+        throw new NotFoundException('Wallet does not exist for this user');
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Transaccion corta en READ COMMITTED.
+   *
+   * SERIALIZABLE hacia chocar bajo carga operaciones de billeteras distintas por sus bloqueos
+   * de predicado, y cada choque era una reserva rechazada o una liquidacion perdida. Aqui la
+   * consistencia sale de bloquear la fila de la billetera (`lockWallet`), de los updates
+   * condicionales sobre el saldo, de los CHECK de saldo no negativo y de la unicidad de
+   * `reference`. Solo un deadlock (P2034) se reintenta, pocas veces y con una espera breve al
+   * azar, para no alargar la respuesta de una puja.
+   */
+  private async inWalletTransaction<T>(operation: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt += 1) {
       try {
-        return await this.prisma.$transaction(operation, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+        return await this.prisma.$transaction(operation, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
       } catch (error) {
         const retryable = error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034';
-        if (!retryable || attempt === retries - 1) throw error;
+        if (!retryable || attempt === WALLET_TX_ATTEMPTS - 1) throw error;
+        await sleep(retryBackoffMs(attempt));
       }
     }
-    throw new InternalServerErrorException('Serializable transaction did not complete');
   }
 }
