@@ -16,6 +16,10 @@ const RETRY_DELAY_MS = 5_000;
  *
  * Aqui la conexion se reintenta cada pocos segundos, al arrancar y cada vez que se cae. Los
  * mensajes pendientes esperan en la cola durable mientras tanto.
+ *
+ * Un consumidor que republica mensajes (por ejemplo, a una cola de reintento) pide un canal
+ * con confirmaciones (`confirm`) para confirmar el original solo cuando RabbitMQ ya guardo la
+ * copia, y declara sus colas extra en `setup`.
  */
 export abstract class ResilientConsumer implements OnModuleInit, OnModuleDestroy {
   protected abstract readonly logger: Logger;
@@ -29,6 +33,7 @@ export abstract class ResilientConsumer implements OnModuleInit, OnModuleDestroy
     private readonly config: ConfigService,
     private readonly queue: string,
     private readonly routingKey: string,
+    private readonly options: { confirm?: boolean } = {},
   ) {}
 
   /**
@@ -36,6 +41,10 @@ export abstract class ResilientConsumer implements OnModuleInit, OnModuleDestroy
    * por el que llego: tras una reconexion el anterior ya no sirve.
    */
   protected abstract handle(message: amqp.ConsumeMessage, channel: amqp.Channel): Promise<void>;
+
+  /** Declara colas o enlaces adicionales en cada conexion, antes de empezar a consumir. */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  protected async setup(_channel: amqp.Channel): Promise<void> {}
 
   onModuleInit(): void {
     void this.connect();
@@ -56,10 +65,11 @@ export abstract class ResilientConsumer implements OnModuleInit, OnModuleDestroy
       this.connection = connection;
       connection.on('error', (error: unknown) => this.logger.warn(`Error en la conexion con RabbitMQ: ${String(error)}`));
       connection.on('close', () => this.resetAndRetry());
-      const channel = await connection.createChannel();
+      const channel = this.options.confirm ? await connection.createConfirmChannel() : await connection.createChannel();
       await channel.assertExchange(EXCHANGE, 'topic', { durable: true });
       await channel.assertQueue(this.queue, { durable: true });
       await channel.bindQueue(this.queue, EXCHANGE, this.routingKey);
+      await this.setup(channel);
       await channel.consume(this.queue, (message) => {
         if (message) void this.handle(message, channel);
       });
