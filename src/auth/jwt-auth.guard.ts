@@ -30,6 +30,7 @@ export class JwtAuthGuard implements CanActivate {
       const { payload } = await jwtVerify(authorization.slice(7).trim(), this.jwks, {
         issuer: this.issuer,
         audience: this.audience,
+        requiredClaims: ['exp'],
       });
       if (typeof payload.sub !== 'string' || typeof payload.role !== 'string') {
         throw new UnauthorizedException('Token payload is incomplete');
