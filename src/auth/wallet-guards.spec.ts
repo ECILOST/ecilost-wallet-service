@@ -37,7 +37,7 @@ describe('JwtAuthGuard', () => {
 
     await expect(new JwtAuthGuard(config).canActivate(context)).resolves.toBe(true);
     expect(jwtVerify).toHaveBeenCalledWith('student-token', expect.any(Function), {
-      issuer: settings.AUTH_ISSUER, audience: settings.AUTH_AUDIENCE,
+      issuer: settings.AUTH_ISSUER, audience: settings.AUTH_AUDIENCE, requiredClaims: ['exp'],
     });
     expect(request.user).toEqual({ id: 'student-id', role: 'STUDENT' });
   });
