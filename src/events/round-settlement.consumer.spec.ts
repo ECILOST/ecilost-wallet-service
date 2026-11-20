@@ -24,6 +24,9 @@ function fakeChannel() {
     sendToQueue: vi.fn().mockReturnValue(true),
     waitForConfirms: vi.fn().mockResolvedValue(undefined),
     assertQueue: vi.fn().mockResolvedValue(undefined),
+    assertExchange: vi.fn(),
+    bindQueue: vi.fn(),
+    publish: vi.fn(),
   };
 }
 
@@ -35,8 +38,8 @@ function roundClosed(body: unknown, attempt?: number) {
   } as unknown as amqp.ConsumeMessage;
 }
 
-function consumerWith(settleRound: ReturnType<typeof vi.fn>) {
-  const consumer = new RoundSettlementConsumer({ getOrThrow: () => 'amqp://test' } as never, { settleRound } as never);
+function consumerWith(settleRound: ReturnType<typeof vi.fn>, hasPaidAward = vi.fn().mockResolvedValue(false)) {
+  const consumer = new RoundSettlementConsumer({ getOrThrow: () => 'amqp://test' } as never, { settleRound, hasPaidAward } as never);
   return consumer as unknown as {
     handle(message: amqp.ConsumeMessage, channel: unknown): Promise<void>;
     setup(channel: unknown): Promise<void>;
@@ -65,6 +68,37 @@ describe('RoundSettlementConsumer', () => {
     expect(settleRound).toHaveBeenCalledWith('r', 'u', new Prisma.Decimal(100));
     expect(channel.ack).toHaveBeenCalledOnce();
     expect(channel.sendToQueue).not.toHaveBeenCalled();
+  });
+
+  it('publica la adjudicación pagada y espera confirmación antes del ack', async () => {
+    const channel = fakeChannel();
+    const message = roundClosed({ roundId: 'r', roomId: 'sala', winnerId: 'u', winningAmount: '100' });
+    await consumerWith(vi.fn().mockResolvedValue(settled)).handle(message, channel);
+
+    expect(channel.publish).toHaveBeenCalledWith('ecilost.events', 'wallet.round.paid.v1', expect.any(Buffer), {
+      persistent: true, contentType: 'application/json', messageId: 'wallet.round.paid:r',
+    });
+    expect(JSON.parse(channel.publish.mock.calls[0][2].toString())).toMatchObject({
+      eventId: 'wallet.round.paid:r', roomId: 'sala', roundId: 'r', winnerId: 'u',
+    });
+    expect(channel.waitForConfirms.mock.invocationCallOrder[0]).toBeLessThan(channel.ack.mock.invocationCallOrder[0]);
+  });
+
+  it('recupera el débito persistido si el mensaje de cierre se reentrega', async () => {
+    const channel = fakeChannel();
+    const paid = vi.fn().mockResolvedValue(true);
+    await consumerWith(vi.fn().mockResolvedValue({ ...settled, debited: null }), paid)
+      .handle(roundClosed({ roundId: 'r', roomId: 'sala', winnerId: 'u' }), channel);
+    expect(paid).toHaveBeenCalledWith('r', 'u');
+    expect(channel.publish).toHaveBeenCalledOnce();
+  });
+
+  it('no publica una adjudicación con saldo pendiente', async () => {
+    const channel = fakeChannel();
+    await consumerWith(vi.fn().mockResolvedValue({ ...settled, shortfall: '1.00' }))
+      .handle(roundClosed({ roundId: 'r', roomId: 'sala', winnerId: 'u' }), channel);
+    expect(channel.publish).not.toHaveBeenCalled();
+    expect(channel.ack).toHaveBeenCalledOnce();
   });
 
   it('un conflicto de serializacion manda la ronda a reintento y no la descarta', async () => {

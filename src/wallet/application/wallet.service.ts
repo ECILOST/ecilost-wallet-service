@@ -252,6 +252,20 @@ export class WalletService {
     });
   }
 
+  /** El débito persistido permite volver a publicar tras una reentrega del cierre. */
+  async hasPaidAward(roundId: string, winnerId: string): Promise<boolean> {
+    const debit = await this.prisma.walletTransaction.findUnique({
+      where: { reference: `settle:${roundId}` },
+      select: { amount: true, metadata: true, type: true, wallet: { select: { userId: true } } },
+    });
+    const metadata = debit?.metadata;
+    return Boolean(
+      debit && debit.type === WalletTransactionType.DEBIT && debit.wallet.userId === winnerId &&
+      debit.amount.gt(0) && metadata && typeof metadata === 'object' &&
+      !Array.isArray(metadata) && metadata.reason === 'round-awarded' && !metadata.shortfall,
+    );
+  }
+
   async getBalance(userId: string) {
     const wallet = await this.prisma.wallet.findUnique({ where: { userId } });
     if (!wallet) return this.emptyBalance();

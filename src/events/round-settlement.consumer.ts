@@ -7,6 +7,10 @@ import { WalletService } from '../wallet/application/wallet.service';
 import { ResilientConsumer } from './resilient-consumer';
 
 const KEY = 'auction.round.closed.v1';
+const EXCHANGE = 'ecilost.events';
+const PICKUP_KEY = 'wallet.round.paid.v1';
+const ENGAGEMENT_QUEUE = 'engagement.pickups.v1';
+const ENGAGEMENT_DLX = 'ecilost.events.dlx';
 const QUEUE = 'ecilost.wallet.round-settlements';
 /** Espera de un reintento: al vencer, RabbitMQ devuelve el mensaje a `QUEUE`. */
 export const RETRY_QUEUE = `${QUEUE}.retry`;
@@ -20,6 +24,8 @@ export const MAX_NON_TRANSIENT_ATTEMPTS = 5;
 /** Lo que wallet necesita del cierre de una ronda que publica auction. */
 interface RoundClosed {
   roundId: string;
+  roomId?: string;
+  entries?: Array<{ kind: string; catalogId: string }>;
   winnerId?: string | null;
   /** Eventos anteriores a HU-28 no traen `winnerId`: el lider al cerrar es el ganador. */
   currentBidderId?: string | null;
@@ -62,6 +68,17 @@ export class RoundSettlementConsumer extends ResilientConsumer {
   }
 
   protected async setup(channel: amqp.Channel) {
+    // Declara la cola aunque Engagement aún no esté desplegado. Así conserva
+    // las adjudicaciones pagadas que se publiquen durante el despliegue.
+    await channel.assertExchange(ENGAGEMENT_DLX, 'direct', { durable: true });
+    await channel.assertQueue('engagement.events.dlq', { durable: true });
+    await channel.bindQueue('engagement.events.dlq', ENGAGEMENT_DLX, 'engagement.dead');
+    await channel.assertQueue(ENGAGEMENT_QUEUE, {
+      durable: true,
+      deadLetterExchange: ENGAGEMENT_DLX,
+      deadLetterRoutingKey: 'engagement.dead',
+    });
+    await channel.bindQueue(ENGAGEMENT_QUEUE, EXCHANGE, PICKUP_KEY);
     await channel.assertQueue(RETRY_QUEUE, {
       durable: true,
       arguments: { 'x-message-ttl': RETRY_DELAY_MS, 'x-dead-letter-exchange': '', 'x-dead-letter-routing-key': QUEUE },
@@ -94,6 +111,17 @@ export class RoundSettlementConsumer extends ResilientConsumer {
       );
       if (result.shortfall) {
         this.logger.warn(`Ronda ${result.roundId}: la reserva del ganador no alcanzaba el precio adjudicado; faltaron ${result.shortfall}.`);
+      }
+      if (typeof event.roomId === 'string' && event.roomId && typeof winnerId === 'string' && winnerId &&
+        (result.debited ? !result.shortfall && new Prisma.Decimal(result.debited).gt(0) :
+          await this.wallets.hasPaidAward(event.roundId, winnerId))) {
+        const eventId = `wallet.round.paid:${event.roundId}`;
+        const publisher = channel as amqp.ConfirmChannel;
+        publisher.publish(EXCHANGE, PICKUP_KEY, Buffer.from(JSON.stringify({
+          eventId, eventType: PICKUP_KEY, occurredAt: new Date().toISOString(),
+          roomId: event.roomId, roundId: event.roundId, winnerId, entries: event.entries ?? [],
+        })), { persistent: true, contentType: 'application/json', messageId: eventId });
+        await publisher.waitForConfirms();
       }
       channel.ack(message);
     } catch (error) {
