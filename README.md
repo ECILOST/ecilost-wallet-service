@@ -69,3 +69,15 @@ npm run test:integration
 ```
 
 La suite de integración usa PostgreSQL de prueba. Consulta `vitest.config.integration.ts` y `test/` para la configuración de su base.
+
+## Cobertura y SonarQube
+
+Ejecuta `npm ci` y luego `npm run test:cov` para generar `coverage/index.html` y
+`coverage/lcov.info`. La cobertura corresponde a la suite que ejecuta `npm test`.
+Vitest exige al menos un 80 % de cobertura global de líneas por repositorio.
+
+El proyecto de SonarQube Cloud es `ECILOST_ecilost-wallet-service` en la organización `ecilost`.
+Para importar LCOV, desactiva **Automatic Analysis** en **Administration > Analysis Method**.
+Configura `SONAR_TOKEN` como secreto de GitHub Actions con permiso de análisis.
+En cada push a la rama predeterminada, CI invoca `sonarcloud.yml` con el LCOV
+generado por `npm run test:cov` y espera el resultado del Quality Gate.
