@@ -1,0 +1,514 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "ECILOST Wallet Service",
+    "version": "0.1.0",
+    "description": "Gestiona billeteras, emisión, recargas y movimientos de Ecicoin. Los saldos propios se consultan con el usuario del JWT."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3002",
+      "description": "Desarrollo local"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Salud"
+    },
+    {
+      "name": "Billeteras"
+    },
+    {
+      "name": "Movimientos"
+    }
+  ],
+  "paths": {
+    "/wallet/health": {
+      "get": {
+        "tags": [
+          "Salud"
+        ],
+        "operationId": "walletHealth",
+        "summary": "Comprueba la salud del proceso",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Proceso disponible.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "status",
+                    "service"
+                  ],
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ok"
+                      ]
+                    },
+                    "service": {
+                      "type": "string",
+                      "enum": [
+                        "wallet-service"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/wallet/me": {
+      "get": {
+        "tags": [
+          "Billeteras"
+        ],
+        "operationId": "getMyWallet",
+        "summary": "Consulta la billetera del usuario",
+        "responses": {
+          "200": {
+            "description": "Billetera existente.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Wallet"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/wallet/me/bootstrap": {
+      "post": {
+        "tags": [
+          "Billeteras"
+        ],
+        "operationId": "bootstrapMyWallet",
+        "summary": "Aprovisiona la billetera propia",
+        "description": "Registra la emisión inicial una sola vez.",
+        "responses": {
+          "201": {
+            "description": "Billetera creada o existente.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Wallet"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/wallet/me/transactions": {
+      "get": {
+        "tags": [
+          "Movimientos"
+        ],
+        "operationId": "getMyTransactions",
+        "summary": "Lista los movimientos propios",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Número de página.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "description": "Movimientos por página.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Página de movimientos desde el más reciente. Los usuarios sin billetera reciben una página vacía.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/wallet/{userId}/recharges": {
+      "parameters": [
+        {
+          "name": "userId",
+          "in": "path",
+          "required": true,
+          "description": "Identificador del usuario en Auth.",
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "tags": [
+          "Movimientos"
+        ],
+        "operationId": "rechargeWallet",
+        "summary": "Acredita Ecicoin a una billetera",
+        "description": "Requiere STAFF. Usa una referencia única por recarga lógica para que repetirla devuelva el movimiento original.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RechargeInput"
+              },
+              "example": {
+                "amount": 50000,
+                "reference": "recarga-local-001"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Billetera, movimiento e indicador de repetición.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RechargeResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "JWT de acceso vigente emitido por ECILOST Auth. Requiere exp."
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Parámetros o cuerpo inválidos.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemDetails"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "JWT ausente o inválido.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemDetails"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "La operación requiere STAFF.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemDetails"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "La billetera no existe.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemDetails"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Wallet": {
+        "type": "object",
+        "required": [
+          "id",
+          "userId",
+          "availableBalance",
+          "heldBalance",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "userId": {
+            "type": "string"
+          },
+          "availableBalance": {
+            "type": "string",
+            "description": "Importe decimal en Ecicoin.",
+            "example": "1250.00"
+          },
+          "heldBalance": {
+            "type": "string",
+            "description": "Importe decimal en Ecicoin.",
+            "example": "1250.00"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "RechargeInput": {
+        "type": "object",
+        "required": [
+          "amount"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "reference": {
+            "type": "string",
+            "maxLength": 128
+          }
+        },
+        "additionalProperties": false
+      },
+      "Transaction": {
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "amount",
+          "createdAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "INITIAL_ISSUANCE",
+              "ADMIN_RECHARGE",
+              "HOLD",
+              "RELEASE",
+              "DEBIT"
+            ]
+          },
+          "amount": {
+            "type": "string",
+            "description": "Importe decimal en Ecicoin.",
+            "example": "1250.00"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "TransactionPage": {
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "pageSize",
+          "total"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Transaction"
+            }
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "pageSize": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "RechargeResult": {
+        "type": "object",
+        "required": [
+          "wallet",
+          "transaction",
+          "replayed"
+        ],
+        "properties": {
+          "wallet": {
+            "$ref": "#/components/schemas/Wallet"
+          },
+          "transaction": {
+            "type": "object",
+            "required": [
+              "id",
+              "walletId",
+              "type",
+              "amount",
+              "availableDelta",
+              "heldDelta",
+              "reference",
+              "createdAt"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "walletId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "INITIAL_ISSUANCE",
+                  "ADMIN_RECHARGE",
+                  "HOLD",
+                  "RELEASE",
+                  "DEBIT"
+                ]
+              },
+              "amount": {
+                "type": "string",
+                "description": "Importe decimal en Ecicoin.",
+                "example": "1250.00"
+              },
+              "availableDelta": {
+                "type": "string",
+                "description": "Importe decimal en Ecicoin.",
+                "example": "1250.00"
+              },
+              "heldDelta": {
+                "type": "string",
+                "description": "Importe decimal en Ecicoin.",
+                "example": "1250.00"
+              },
+              "reference": {
+                "type": "string",
+                "nullable": true
+              },
+              "metadata": {
+                "type": "object",
+                "nullable": true,
+                "additionalProperties": true
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ProblemDetails": {
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status"
+        ],
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}
