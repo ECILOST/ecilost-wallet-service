@@ -4,8 +4,11 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { ProblemDetailsFilter } from './common/filters/problem-details.filter';
 
+import { installMetrics } from './observability/metrics';
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  installMetrics(app, 'wallet');
   app.setGlobalPrefix('wallet');
   app.useGlobalPipes(
     new ValidationPipe({
